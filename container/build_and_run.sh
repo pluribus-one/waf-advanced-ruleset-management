@@ -1,0 +1,1 @@
+podman build --layers -t owasp-warm -f Containerfile ../ && clear && podman run -p 8000:8000 owasp-warm

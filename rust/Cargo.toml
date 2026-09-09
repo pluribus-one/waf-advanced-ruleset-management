@@ -1,0 +1,7 @@
+[workspace]
+members = ["src/nginx-module","src/warm-ml"]
+default-members = ["src/nginx-module"]
+resolver = "3"
+
+[workspace.dependencies]
+modsecurity = { path = "../rust-modsecurity" }
