@@ -6,7 +6,10 @@ use regex::Regex;
 use http::{Request, Version};
 use modsecurity::{ModSecurity};
 
+use crate::warm::{WarmEvaluator, WarmVerdict};
+
 /// Represents a SecRule
+#[derive(Debug)]
 pub struct SecRule {
     /// The SecRule id
     id: i64
@@ -42,17 +45,14 @@ impl SecRule {
     }
 }
 
-pub trait WafEngine: Default{
+pub trait WafEngine: Default + WarmEvaluator{
     /// Gets the rules added in this engine
     fn get_rules(&self) -> &Vec<SecRule>;
     /// Gets the number of rules added in this engine
     fn get_num_rules(&self) -> usize;
 
     ///Evaluates a request against the added rules and gives a list of the rules triggered
-    fn evaluate(&self, req: &Request<String>) -> Vec<SecRule>;
-
-    ///Evaluates a request and tells if the WAF wants to block it
-    fn should_block(&self, req: &Request<String>) -> bool;
+    fn evaluate_rules(&self, req: &Request<String>) -> Vec<SecRule>;
 
     ///Gets the secrule index inside the internal vec.
     /// 
@@ -142,7 +142,7 @@ impl ModSecEngineBuilder {
     /// 
     /// # Attention
     /// The config files like _modsecurity.conf_ and _crs-setup.conf_ must be loaded with [ModSecEngineBuilder::with_config_file]
-    /// before calling this function.
+    /// **BEFORE** calling this function.
     /// 
     /// # Arguments
     /// * `folder_path` - The folder which will be read for getting all config files (.conf files)
@@ -208,6 +208,25 @@ impl Default for ModSecEngine {
     }
 }
 
+impl WarmEvaluator for ModSecEngine {
+    fn evaluate(&self, req: &Request<String>) -> crate::warm::WarmVerdict {
+        let mut transaction = self.ms.transaction_builder()
+        .with_rules(&self.ms_rules)
+        .build().expect("Error building transaction");
+    
+        self.process_request(&mut transaction, &req);
+        
+        //Check if ModSecurity wants to block the request
+        let intervention = transaction.intervention();
+
+        if let Some(intervention) = intervention {
+            WarmVerdict::new(!intervention.disruptive(), linfa::dataset::Pr::default())
+        } else {
+            WarmVerdict::new(true, linfa::dataset::Pr::default())
+        }   
+    }
+}
+
 impl WafEngine for ModSecEngine{
     fn get_rules(&self) -> &Vec<SecRule> {
         &self.secrules
@@ -221,7 +240,7 @@ impl WafEngine for ModSecEngine{
     /// # NOTE
     /// At the moment evaluates only the URI and headers of a request.
     /// To evaluate also the request body [ModSecEngine::process_request] must be modified.
-    fn evaluate(&self, req: &Request<String>) -> Vec<SecRule> {
+    fn evaluate_rules(&self, req: &Request<String>) -> Vec<SecRule> {
         let mut triggered_rules: Vec<SecRule> = Vec::new();
 
         let mut transaction = self.ms.transaction_builder()
@@ -244,22 +263,7 @@ impl WafEngine for ModSecEngine{
         self.secrulesid_bind.get(&rule_id)
     }
     
-    fn should_block(&self, req: &Request<String>) -> bool {
-        let mut transaction = self.ms.transaction_builder()
-        .with_rules(&self.ms_rules)
-        .build().expect("Error building transaction");
     
-        self.process_request(&mut transaction, &req);
-        
-        //Check if ModSecurity wants to block the request
-        let intervention = transaction.intervention();
-
-        if let Some(intervention) = intervention {
-            intervention.disruptive()
-        } else {
-            false
-        }
-    }
     
     
 }
@@ -285,9 +289,9 @@ impl ModSecEngine {
         }
 
         // Add request body to transaction
-        transaction.append_request_body(req.body().as_bytes()).expect(
-            format!("Modsecurity error while adding the request body with value: {}",req.body().as_str())
-        .as_str());
+        transaction.append_request_body(req.body().as_bytes()).unwrap_or_else(|_|
+            panic!("Modsecurity error while adding the request body with value: {}",req.body().as_str())
+        );
         
 
         let uri = req.uri().to_string();
@@ -329,8 +333,14 @@ impl Default for MockEngine{
         
         Self { 
             secrules: rules,
-            secrules_bind: secrules_bind,
+            secrules_bind,
         }
+    }
+}
+
+impl WarmEvaluator for MockEngine {
+    fn evaluate(&self, req: &Request<String>) -> WarmVerdict {
+        WarmVerdict::new(!self.evaluate_rules(req).is_empty(), linfa::dataset::Pr::default())
     }
 }
 
@@ -343,7 +353,7 @@ impl WafEngine for MockEngine{
         self.secrules.len()
     }
     
-    fn evaluate(&self, req: &Request<String>) -> Vec<SecRule> {
+    fn evaluate_rules(&self, req: &Request<String>) -> Vec<SecRule> {
         let mut triggered_rules: Vec<SecRule> = Vec::new();
 
         if req.uri().to_string().contains("admin") {
@@ -360,10 +370,6 @@ impl WafEngine for MockEngine{
         }
 
         triggered_rules
-    }
-    
-    fn should_block(&self, req: &Request<String>) -> bool {
-        self.evaluate(req).len() > 0
     }
     
     fn get_rule_index(&self, rule_id: i64) -> Option<&usize> {

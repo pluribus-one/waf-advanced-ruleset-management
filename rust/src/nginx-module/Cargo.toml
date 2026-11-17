@@ -1,0 +1,15 @@
+[package]
+name = "nginx-module"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+name = "warm"
+crate-type = ["cdylib"]
+
+[dependencies]
+ngx = {version="0.5.1", features=["vendored"]}
+modsecurity = {workspace = true}
+warm-ml = { path = "../warm-ml" }
+libc = "0.2"
+http = "1"

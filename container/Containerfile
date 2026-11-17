@@ -10,14 +10,19 @@ ARG NGX_VERSION
 
 WORKDIR /warm
 
-RUN --mount=type=cache,target=/var/cache/apt \ 
-    --mount=type=cache,target=/var/lib/apt \ 
+RUN --mount=type=cache,target=/var/cache/apt \
+    --mount=type=cache,target=/var/lib/apt \
     apt update && \
     apt install -y --no-install-recommends --no-install-suggests \
-    libpcre2-dev libssl-dev zlib1g-dev make git libclang-dev pkg-config libmodsecurity3 libmodsecurity-dev
+    libpcre2-dev libssl-dev zlib1g-dev build-essential git libclang-dev pkg-config libmodsecurity3 libmodsecurity-dev libfontconfig1-dev
 
-COPY rust/src src
+COPY rust-modsecurity /rust-modsecurity
+COPY rust/src/nginx-module/src src/nginx-module/src
+COPY rust/src/nginx-module/Cargo.toml src/nginx-module/Cargo.toml
+COPY rust/src/warm-ml/src src/warm-ml/src
+COPY rust/src/warm-ml/Cargo.toml src/warm-ml/Cargo.toml
 COPY rust/Cargo.toml Cargo.toml
+COPY rust/Cargo.lock Cargo.lock
 
 RUN --mount=type=cache,id=cargo,target=/usr/local/cargo/registry \
     cargo fetch
@@ -26,17 +31,25 @@ RUN --mount=type=cache,id=cache,target=.cache \
     --mount=type=cache,id=cargo,target=/usr/local/cargo/registry \
     cargo build --release
 
-COPY container/warm.conf .
-
 FROM docker.io/library/nginx:${NGX_VERSION}-${DEBIAN_RELEASE}
 
-COPY --from=build /warm/target/release/libwarm.so /etc/nginx/modules/libwarm.so
-COPY --from=build /warm/warm.conf /etc/nginx/conf.d/warm.conf
-
-RUN --mount=type=cache,target=/var/cache/apt \ 
+RUN --mount=type=cache,target=/var/cache/apt \
     --mount=type=cache,target=/var/lib/apt \
-    apt update && apt install -y libmodsecurity3
+    apt update
+
+RUN --mount=type=cache,target=/var/cache/apt \
+    --mount=type=cache,target=/var/lib/apt \
+    apt install -y libmodsecurity3
+
+COPY --from=build /warm/target/release/libwarm.so /etc/nginx/modules/libwarm.so
+COPY rust/src/warm-ml/data/crs /etc/warm/crs
+COPY rust/src/warm-ml/data/setup/crs-setup-pl4.conf /etc/warm/crs-setup-pl4.conf
+COPY rust/src/warm-ml/data/setup/modsecurity.conf /etc/warm/modsecurity.conf
+COPY rust/src/warm-ml/data/setup/unicode.mapping /etc/warm/unicode.mapping
+COPY rust/src/warm-ml/data/models/warm_lr_100_50.bin /etc/warm/model.bin
+COPY container/warm.conf /etc/nginx/conf.d/warm.conf
 
 EXPOSE 8000
 
 CMD ["nginx", "-c", "/etc/nginx/conf.d/warm.conf"]
+# CMD ["sleep", "infinity"] #DEBUG

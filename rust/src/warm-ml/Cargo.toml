@@ -4,12 +4,9 @@ version = "0.1.0"
 edition = "2024"
 
 [[example]]
-name = "train"
-crate-type = ["bin"]
+name = "sql_params"
+path = "examples/sql_params/sql.rs"
 
-[[example]]
-name = "test"
-crate-type = ["bin"]
 
 [dependencies]
 bincode = {version="2", features=["serde"]}
@@ -20,6 +17,7 @@ linfa-logistic = {version="0.8.1", features = ["serde"]}
 linfa-svm = {version="0.8.1",features = ["serde"]}
 modsecurity = {workspace = true}
 ndarray = "0.16.1"
+plotters = "0.3.7"
 rand = "0.10.1"
 regex = "1.12.3"
 serde = "1.0.228"

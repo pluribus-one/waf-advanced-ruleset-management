@@ -1,14 +1,17 @@
-use warm_ml::{WarmMLModelAlgorithm::{self}, waf_engines::{ModSecEngineBuilder, WafEngine}};
+use ndarray::array;
+use warm_ml::{dataset::*, ml_model::*, warm::*, waf_engines::*, warm_test::*};
 use std::{str::FromStr, sync::OnceLock};
 use urlencoding::encode;
 use http::{Request,Uri};
-use warm_ml::*;
 use std::time::Instant;
-use std::fs;
 
 mod common;
+use crate::common::get_modsec_engine_pl4;
 
-static TEST_DATASET: OnceLock<WarmMLDataset>= OnceLock::new();
+static TEST_DATASET: OnceLock<WarmDatasetBuilder>= OnceLock::new();
+const RESULTS_FILES_PATH: &str = "data/results";
+const MODELS_FILES_PATH: &str = "data/models";
+const FEATURES_FILES_PATH: &str = "data/features";
 
 fn create_request(payload: &str) -> Request<String> {
     let query = encode(payload);
@@ -17,7 +20,7 @@ fn create_request(payload: &str) -> Request<String> {
     Request::builder()
         .uri(uri)
         .method("GET")
-        .header("host", "localhost")
+        .header("host", "example.com")
         .header("user-agent", "my-rust-client/1.0")
         .header("accept", "*/*")
         .header("content-type", "application/json")
@@ -37,124 +40,100 @@ fn create_request_legitimate() -> Request<String> {
     return create_request("testing a LEGITimate request with &some $\' w\"eird haacter?! SELECT ");
 }
 
-fn test_modsec_with_mock(algorithm: WarmMLModelAlgorithm, version: &str, malicious_req: Request<String>){
-    let model_alg = algorithm.to_string();
+#[test]
+fn test_req_get_post() {
+    let payloads = array![
+        "%f0%80%80%ae%f0%80%80%ae%c1%1cboot.ini",
+        "..../0x5c..../0x5c..../0x5c..../0x5c..../0x5cwindows0x5csystem320x5cdrivers0x5cetc0x5chosts",
+        "%3Cbdo%20oncopy%3D%22confirm%281%29%22%20contenteditable%3Etest%3C/bdo%3E",
+        "%3Cbr%20onkeyup%3D%22prompt%281%29%22%20contenteditable%3Etest%3C/br%3E",
+        "p=%3Cheader%20onclick%3D%22alert%281%29%22%3Etest%3C/header%3E",
+        "%3Cheader%20onclick%3D%22alert%281%29%22%3Etest%3C/header%3E",
+        "%2e%2e%uEFC8%2e%2e%uEFC8%2e%2e%uEFC8%2e%2e%uEFC8etc%uEFC8passwd",
+        ";%20ls%20-l%20/tmp",
+        "%22%3Ca%20href=%22%22...%22%22%20target=%22%22_blank%22%22%20rel=%22%22%22%22%3E%22",
+        "%22%3C!--#echo%20var=%22%22DOCUMENT_URI%22%22%20--%3E%22",
+        "http:www.whitelisteddomain.tld@0xd8.0x3a.0xd6.0xce",
+        "xxe.dtd",
+        ".php%5Cx00.png",
+        "$user_info%20=%20get_user_info($user_id);",
+        "%7B%20$ne:%201%20%7D"
+    ];
 
-    let warm = Warm::<waf_engines::ModSecEngine>::load(
-        format!("data/model/warm_{model_alg}_{version}.bin").as_str(), 
-        common::get_modsec_engine_pl4(), 
-        algorithm
-    ).expect("File not found");
+    let waf = get_modsec_engine_pl4();
 
-    let verdict = warm.evaluate(&malicious_req);
-    println!("warm_{model_alg}_{version} scored {} for request {}", verdict.get_score().abs(), malicious_req.uri().to_string());
-    assert!(!verdict.is_safe());
+    for payload in payloads {
+        let get_req = Request::builder().uri(format!("/?p={payload}")).method("GET").body(String::new()).unwrap();
+        let post_req = Request::builder().uri(format!("/")).method("GET").body(String::from(payload)).unwrap();
+        let get_post_req = Request::builder().uri(format!("/?p={payload}")).method("GET").body(String::from(payload)).unwrap();
+        
+        println!("Payload '{payload}:");
+        let rules = waf.evaluate_rules(&get_req);
+        println!("\tGET: {:?}", rules.iter().map(|r| r.get_id()).collect::<Vec<i64>>());
 
-    let legitimate_req = create_request_legitimate();
-    let verdict = warm.evaluate(&legitimate_req);
-    println!("warm_{model_alg}_{version} scored {} for request {}", verdict.get_score().abs(), legitimate_req.uri().to_string());
-    assert!(verdict.is_safe());
+        let rules = waf.evaluate_rules(&post_req);
+        println!("\tPOST: {:?}", rules.iter().map(|r| r.get_id()).collect::<Vec<i64>>());
+
+        let rules = waf.evaluate_rules(&get_post_req);
+        println!("\tGET_POST: {:?}", rules.iter().map(|r| r.get_id()).collect::<Vec<i64>>());
+    }
+
+
 }
 
-fn test_modsec_with_dataset(model_file_path: &str, algorithm: WarmMLModelAlgorithm) -> (Vec<(String, u32, u32)>, f32) {
+fn test_warm_lr(model_name: &str) -> WarmDatasetTest {
     println!("Creating test dataset");
     let test_dataset = TEST_DATASET.get_or_init(common::get_all_test_dataset);
-    let test_data = test_dataset.get_files_samples();
+    
+    let model_file_path = format!("{MODELS_FILES_PATH}/{model_name}.bin");
+    let results_file_path = format!("{RESULTS_FILES_PATH}/{model_name}");
 
-    let warm = Warm::<waf_engines::ModSecEngine>::load(
-            model_file_path, 
-            common::get_modsec_engine_pl4(), 
-            algorithm
+
+    let warm = Warm::<ModSecEngine, WarmModelLR>::load(
+            &model_file_path, 
+            common::get_modsec_engine_pl4()
     ).expect("File not found");
+    //warm.set_threshold(Pr::new(0.80));
 
-
-    let mut average_time = 0.0;
-    let mut results: Vec<(String, u32, u32)> = Vec::new();
+    let waf_engine = warm.get_waf_engine();
 
     println!("Performing tests for model {model_file_path}");
 
-    for data in test_data {
-        let samples = data.0.get_samples();
-        let mut id = data.0.get_id();
-        let label = data.1;
-        let mut correct_answers = 0;
-        let mut wrong_answers = 0;
+    let mut test_files: Vec<WarmFileTest> = Vec::new();
 
-        if id.is_empty() {
-            id = data.0.get_file_path();
-        }
+    for file in test_dataset.get_files() {
+        let feature_dataset = WarmFeatureDataset::load(format!("{FEATURES_FILES_PATH}/{}.bin", file.get_normalized_name()).as_str());
 
-        for req in samples{
-            let now = Instant::now();
-            let verdict = warm.evaluate(req);
-            average_time += now.elapsed().as_nanos() as f32;
-
-            if verdict.is_safe() != label {
-                correct_answers += 1;
-            } else {
-                wrong_answers += 1;
+        // Check if loading was successful. If not extract features and save them in a file.
+        let feature_dataset = match feature_dataset {
+            Ok(v) => {
+                println!("Loaded feature dataset");
+                v
+            },
+            Err(_) => {
+                println!("Creating feature dataset");
+                let loaded_dataset = WarmFeaturesExtractor::get_features_from_dataset(waf_engine, &test_dataset.build());
+                loaded_dataset.save(format!("{FEATURES_FILES_PATH}/dataset.bin").as_str());
+                loaded_dataset
             }
-        }
+        };
 
-        results.push((String::from(id), correct_answers, wrong_answers));
+        let test_file = WarmFileTest::test_with_feature_dataset(file.get_normalized_name(), &warm, &feature_dataset);
+        test_files.push(test_file);
     }
 
-    average_time = (average_time / test_dataset.get_samples_len() as f32) / 1000000.0;  //Calculating the average and converting nano to milliseconds
-
-    (results, average_time)
+    WarmDatasetTest::from_files_test(model_name.to_string(), test_files)
 }
 
-macro_rules! generate_dataset_tests {
-    ($($name:ident => $alg_str:expr, $usage_percentage:expr, $legit_percentage:expr),*) => {
+macro_rules! generate_lr_dataset_tests {
+    ($($name:ident => $usage_percentage:expr, $legit_percentage:expr),*) => {
         $(
             #[test]
             fn $name() {
-                let algorithm: Result<WarmMLModelAlgorithm, WarmMLModelAlgorithmParseError> = $alg_str.parse();
-
-                if let Ok(algorithm) = algorithm{
-                    let mut results_string: String;
+                let name = format!("warm_lr_{}_{}", $usage_percentage, $legit_percentage);
+                let test_result = test_warm_lr(&name);
                     
-                    // Get results
-                    let (results, avg_time) = test_modsec_with_dataset(format!("data/model/warm_{}_{}_{}.bin", $alg_str, $usage_percentage, $legit_percentage).as_str(), algorithm);
-
-                    results_string = format!("Average elapsed time for evaluating {}_{}_{} model: {avg_time} ms", $alg_str, $usage_percentage, $legit_percentage);
-                    results_string = format!("{results_string}\nTest results for {}_{}_{} model:", $alg_str, $usage_percentage, $legit_percentage);
-                    
-                    for result in results {
-                        let (id, correct, wrong) = result;
-                        let (id, correct, wrong) = (id, correct as f32, wrong as f32);
-
-                        let correct_percentage = correct*100.0/(correct+wrong);
-
-                        results_string = format!("{results_string}\n - Dataset \"{id}\": {correct_percentage}% ({correct} correct / {} total)", correct+wrong);
-                    }
-
-                    println!("{results_string}");
-                    fs::write(format!("data/results/warm_{}_{}_{}.txt", $alg_str, $usage_percentage, $legit_percentage), results_string).expect("Error writing results to file");
-                } else {
-                    println!("Specified wrong algorithm in test name!");
-                }
-
-
-            }
-        )*
-    };
-}
-
-macro_rules! generate_mock_tests {
-    ($($name:ident => $alg_str:expr, $version:expr, $request:expr),*) => {
-        $(
-            #[test]
-            fn $name() {
-                let algorithm: Result<WarmMLModelAlgorithm, WarmMLModelAlgorithmParseError> = $alg_str.parse();
-                let version_str = match $version {
-                    Some(n) => n.to_string(),
-                    None => String::from("complete"),
-                };
-
-                if let Ok(algorithm) = algorithm{
-                    test_modsec_with_mock(algorithm, version_str.as_str(), $request);
-                }
+                test_result.save_as_markdown(format!("{RESULTS_FILES_PATH}/{name}").as_str());
             }
         )*
     };
@@ -172,89 +151,45 @@ macro_rules! generate_vanilla_tests {
                     "data/setup/crs-setup-pl4.conf",
                 ];
 
-                let mut results_string = String::from(format!("Test results for vanilla evaluation with pl {}:", $pl_level));
-
                 let engine = ModSecEngineBuilder::new()
                     .with_config_file("data/setup/modsecurity.conf")
                     .with_config_file(configs_path[$pl_level-1])
                     .with_rules_from_folder("data/crs").build();
-                println!("Creating test dataset");
+
                 let dataset = TEST_DATASET.get_or_init(common::get_all_test_dataset);
-                let data = dataset.get_files_samples();
-                let mut average_time = 0.0;
-                
-                println!("Performing evaluations");
-                // Loop through each file data
-                for (file_data, label) in data{
-                    let samples = file_data.get_samples();
-                    let (mut correct, mut wrong) = (0.0,0.0);
-                    
-                    // Loop through each sample in file data
-                    for sample in samples{
-                        let now = Instant::now();
-                        let result = engine.should_block(sample);
-                        average_time += now.elapsed().as_nanos() as f64;
+                let dataset = dataset.build();
 
-                        if result == *label {
-                            correct += 1.0;
-                        } else {
-                            wrong += 1.0;
-                        }
+                let test_name = format!("vanilla_pl{}", $pl_level);
 
-                    }
+                let test_result = WarmDatasetTest::test(test_name.to_string(), &engine, &dataset);
 
-                    let correct_percentage = correct*100.0/(correct+wrong);
-                    results_string = format!("{results_string}\n - Dataset \"{}\": {correct_percentage}% ({correct} correct / {} total)", file_data.get_id(), correct+wrong);
-                }
-
-                average_time = (average_time / dataset.get_samples_len() as f64) / 1000000.0;  //Calculating the average and converting nano to milliseconds
-                results_string = format!("{results_string}\nAverage elapsed time for evaluation: {average_time} ms");
-
-                fs::write(format!("data/results/vanilla_pl{}.txt", $pl_level), results_string).expect("Error writing results to file");
-
+                test_result.save_as_markdown(format!("{RESULTS_FILES_PATH}/{test_name}").as_str());
             }
         )*
     };
 }
 
-generate_dataset_tests!(
-    dataset_svm_010_050 => "svm", 10.0, 50.0,
-    dataset_svm_030_050 => "svm", 30.0, 50.0,
-    dataset_svm_050_050 => "svm", 50.0, 50.0,
-    dataset_svm_010_070 => "svm", 10.0, 70.0,
-    dataset_lr_010_050 => "lr",10.0, 50.0,
-    dataset_lr_010_010 => "lr",10.0, 10.0,
-    dataset_lr_030_050 => "lr",30.0, 50.0,
-    dataset_lr_050_050 => "lr",50.0, 50.0,
-    dataset_lr_050_070 => "lr",50.0, 70.0,
-    dataset_lr_070_050 => "lr",70.0, 50.0,
-    dataset_lr_100_050 => "lr",100.0, 50.0,
-    dataset_lr_100_080 => "lr",100.0, 80.0,
-    dataset_lr_100_020 => "lr",100.0, 20.0, 
-    dataset_lr_100_010 => "lr",100.0, 10.0
+generate_lr_dataset_tests!(
+    dataset_lr_010_050 => 10.0, 50.0,
+    dataset_lr_010_030 => 10.0, 30.0,
+    dataset_lr_010_070 => 10.0, 70.0,
+
+    dataset_lr_030_050 => 30.0, 50.0,
+
+    dataset_lr_050_050 => 50.0, 50.0,
+
+    dataset_lr_070_050 => 70.0, 50.0,
+    
+    // dataset_lr_100_090 => 100.0, 90.0,
+    // dataset_lr_100_080 => 100.0, 80.0,
+    dataset_lr_100_070 => 100.0, 70.0, 
+    dataset_lr_100_060 => 100.0, 60.0,
+    dataset_lr_100_050 => 100.0, 50.0,
+    dataset_lr_100_040 => 100.0, 40.0,
+    dataset_lr_100_030 => 100.0, 30.0
+    // dataset_lr_100_020 => 100.0, 20.0, 
+    // dataset_lr_100_010 => 100.0, 10.0
 );
-
-// generate_mock_tests!(
-//     mock_sqli_svm_0100 => "svm", 100, create_request_sqli(),
-//     mock_sqli_svm_1000 => "svm",1000, create_request_sqli(),
-//     mock_sqli_svm_3000 => "svm",3000, create_request_sqli(),
-//     mock_sqli_svm_complete => "svm",None::<usize>, create_request_sqli(),
-//     mock_sqli_lr_0100 => "lr",100, create_request_sqli(),
-//     mock_sqli_lr_1000 => "lr",1000, create_request_sqli(),
-//     mock_sqli_lr_3000 => "lr",3000, create_request_sqli(),
-//     mock_sqli_lr_8000 => "lr",8000, create_request_sqli(),
-//     mock_sqli_lr_complete => "lr",None::<usize>, create_request_sqli(),
-
-//     mock_xss_svm_0100 => "svm", 100, create_request_xss(),
-//     mock_xss_svm_1000 => "svm",1000, create_request_xss(),
-//     mock_xss_svm_3000 => "svm",3000, create_request_xss(),
-//     mock_xss_svm_complete => "svm",None::<usize>, create_request_xss(),
-//     mock_xss_lr_0100 => "lr",100, create_request_xss(),
-//     mock_xss_lr_1000 => "lr",1000, create_request_xss(),
-//     mock_xss_lr_3000 => "lr",3000, create_request_xss(),
-//     mock_xss_lr_8000 => "lr",8000, create_request_xss(),
-//     mock_xss_lr_complete => "lr",None::<usize>, create_request_xss()
-// );
 
 generate_vanilla_tests!(
     dataset_vanilla_1 => 1,
