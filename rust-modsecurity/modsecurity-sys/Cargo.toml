@@ -1,0 +1,27 @@
+[package]
+name = "modsecurity-sys"
+description = "Rust bindings for ModSecurity"
+license = "MIT OR Apache-2.0"
+version = "1.0.0"
+authors = ["Rohan Krishnaswamy <rohan@fastmail.us>"]
+repository = "https://github.com/rkrishn7/rust-modsecurity"
+keywords = ["modsecurity", "security", "waf"]
+edition = "2021"
+
+include = [
+    "../LICENSE-MIT",
+    "../LICENSE-APACHE",
+    "/README.md",
+    "build.rs",
+    "src/*.rs",
+    "src/transaction_ext.cpp",
+    "wrapper.h",
+]
+
+[build-dependencies]
+pkg-config = "0.3.30"
+cc = "1"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
